@@ -35,7 +35,7 @@ var ID_COUNTER = 1;
 //	Array methods to be "normalized" -- See below for how methods using these names are
 //	added to Object should they not exist for Arrays in the current interpreter.
 //
-var ARR_M = ["each", "map", "filter", "every", "some", "reduce", "reduceRight"];
+var ARR_M = ["each", "forEach", "map", "filter", "every", "some", "reduce", "reduceRight", "indexOf", "lastIndexOf"];
 
 //	Used by various trim methods.
 //	See bottom of this file for some further initialization.
@@ -56,104 +56,48 @@ var NATIVE_TRIM	= !!("".trim);
 
 var EVENTS	= {};
 
-//	##DOMREQUIRE
+//	This will be assigned the instantiated Terrace Object, below, and returned to exports.
 //
-//	Terrace#require needs to work on both client and server. On server, it is essentially
-//	an alias for calling Node#require directly, doing some argument passing sugar only.  On
-//	the client, we need to actually fetch a file.  This method does that.
-//
-//	NOTE: Node #require blocks execution until dependency is initialized. In the browser,
-//	dependencies are loaded in parallel (async), and during load time the Object chain is 
-//  blocked (@see #queue, #extend), and restarted when dependencies are done loading. Outside 
-//  of the Object chain execution of other script on the page is *not* blocked.
-//
-//	@see	#require
-//
-var DOMREQUIRE = function(moduleName, cont, args, $this, asDependency) {
+var $;
 
-	//	folderWhereThisFileIs/modules/sentName/sentName.js
+//	Tracks kit loading status/kit data during require.
+//
+//  #__o    The order in which a list of kits will be initialized post-load.
+//  #__r    Collection of require data.
+//
+//	@see	#DOMREQUIRE
+//
+var KITS = {
+    __o : [],
+    __r : []
+};
+
+//  ##ADD_SCRIPT_FILE
+//
+//  Adds a <script> to the HEAD of a document.
+//
+//  @see    #require
+//  @see    #addScriptFile
+//
+var ADD_SCRIPT_FILE = function(src, cb, doc) {
+    doc = doc || DOCUMENT;
+	var scriptT	= doc.createElement('script');
+	var docHead	= doc.getElementsByTagName('script')[0];
+
+	//	Note the setting of async to `true`
 	//
-	var src = $.ns.path + "/modules/" + moduleName + "/" + moduleName + ".js";
-
-	//	Avoid reloading modules.
-	//
-	if(LOADED_MODULES.hasOwnProperty(moduleName)) {
-		return;
-	} else {
-		LOADED_MODULES[moduleName] = 1;
-	}
-
-	var callback	= function() {
-
-		var r 		= REQUIRED.shift();
-
-		r.exports	= module.exports || $.noop;
-
-		//	When a dependency request is received, the dependency must be executed prior
-		//	to its dependent. We #require the dependency, prepending a flag ([true]) to the
-		//	argument array. #require will then call this method (#DOMREQUIRE) with
-		//	a final argument (#asDependency) indicating that this requirement should
-		//	be *pre-pendended* to the #SCRIPTS collection, ensuring that it is executed
-		//	first.  See below, re: shift/unshift. 
-		//
-		if(module.dependencies) {
-			$.require.apply($, [true].concat(module.dependencies));
-			delete module.dependencies;
-		}
-
-		SCRIPTS[asDependency ? "unshift" : "push"](r);
-
-		//	When no more modules are required, initialize.
-		//
-		if(REQUIRED.length < 1) {
-			//	Now run any onload handlers set on the required scripts. Note that the onload
-			//	handlers will be run in the order they were #require-d, and will execute
-			//	in Object scope.
-			//
-			$.each(function(sOb) {
-			
-				var sn = sOb.snode;
-
-                //  Initialize the module, sending it any arguments, then call any
-                //  module initialization callback.
-                //
-				sOb.exports.apply($this, sOb.origArgs);
-				sOb.cont.call($this, sOb);
-
-				delete sOb.cont;
-				delete sOb.origArgs;
-				delete sOb.exports;
-
-				sn.parentNode.removeChild(sn);
-
-			}, SCRIPTS);
-
-			$.runQueue('__require');
-		}
-	};
-
-	var scriptT	= DOCUMENT.createElement('script');
-	var docHead	= DOCUMENT.getElementsByTagName('script')[0];
-
-	//	Note the setting of async to `true`, and assignment of a random id.
-	//
-	scriptT.id		= $.uuid();
 	scriptT.type 	= 'text/javascript';
 	scriptT.charset	= $.options("charset");
 	scriptT.async	= true;
 	scriptT.src 	= src;
 	scriptT.loaded	= false;
 
-	//	Once #s is inserted,
 	scriptT.onload = scriptT.onreadystatechange = function() {
-
 		if(!this.loaded && (!this.readyState  || this.readyState == "loaded" || this.readyState == "complete")) {
-
 			//	Clear the handlers (memory), and fire.
 			//
 			scriptT.onload = scriptT.onreadystatechange = null;
-
-			callback && callback();
+			cb && cb();
 		}
 	};
 
@@ -161,43 +105,93 @@ var DOMREQUIRE = function(moduleName, cont, args, $this, asDependency) {
 	//
 	docHead.parentNode.insertBefore(scriptT, docHead);
 
-	// 	We are now going to push this newly required script object onto a queue.
-	//	As each required script is loaded, we will check if *all* required scripts have
-	// 	loaded. At which point all the onload handlers will be fired, in order.  See the
-	//	#onload handler defined above.
-	//
-	REQUIRED.push({
-		src			: src,
-		moduleName	: moduleName,
-		snode		: scriptT,
-		cont		: cont || $.noop,
-		origArgs	: args || [],
-		exports		: null
-	});
+	return scriptT;
 };
 
-//	Tracks module loading in DOM.
+//	##DOMREQUIRE
 //
-//	@see	#DOMREQUIRE
+//	Terrace#require needs to work on both client and server. On server, it is essentially
+//	an alias for calling Node#require directly, doing some argument passing sugar only.  On
+//	the client, we need to actually fetch a file.  This method does that.
 //
-var LOADED_MODULES = {};
+//	NOTE: Node #require blocks execution until dependency is initialized. In the browser,
+//	dependencies are loaded in parallel (async), and during load time the Object chain is
+//  blocked (@see #queue, #extend), and restarted when dependencies are done loading. Outside
+//  of the Object chain execution of other script on the page is *not* blocked.
+//
+//	@see	#require
+//
+var DOMREQUIRE = function(kitName, cont, args, $this, asDependency) {
 
-//	This will be assigned the instantiated Terrace Object, below, and returned to exports.
-//
-var $;
+	//	folderWhereThisFileIs/kits/sentName/sentName.js
+	//
+	var src = $.$n.path + "/kits/" + kitName + "/" + kitName + ".js";
 
-//	Storage of lazy-loaded script information.
-//
-//	@see		#require
-//
-var SCRIPTS		= [];
+	//	Avoid reloading modules.
+	//
+	if(KITS.hasOwnProperty(kitName)) {
+		return;
+	} else {
+		KITS[kitName] = 1;
+	}
 
-// 	Script requirement tracking.
-//
-//	@see		#require
-//	@see		#extend
-//
-var REQUIRED	= [];
+	var callback	= function() {
+
+		var r 		= KITS.__r.shift();
+
+		//  If the current kit has dependencies then add them to the requirements list.
+		//  Dependencies must be added prior to dependant. Flag for #require to set
+		//  the #asDependency argument when it calls back ([true]).
+		//
+		if(module.dependencies) {
+			$.require.apply($, [true].concat(module.dependencies));
+			delete module.dependencies;
+		}
+
+		KITS.__o[asDependency ? "unshift" : "push"](r);
+
+		//	When no more modules are required, initialize.
+		//
+		if(KITS.__r.length < 1) {
+			//	Now run any onload handlers set on the required scripts. Note that the onload
+			//	handlers will be run in the order they were #require-d, and will execute
+			//	in Object scope.
+			//
+			$.each(function(sOb) {
+
+                //  Initialize the module, sending it any arguments, then call any
+                //  module initialization callback.
+                //
+				KITS[sOb.kitName].call($this, sOb.origArgs);
+				sOb.cont.call($this, sOb);
+
+				KITS[sOb.kitName] = 1;
+
+				sOb.snode.parentNode.removeChild(sOb.snode);
+
+			}, KITS.__o);
+
+			KITS.__o = [];
+
+			$.runQueue('__require');
+		}
+	};
+
+    var script = ADD_SCRIPT_FILE(src, function() {
+        KITS[kitName] = module.exports;
+        callback && callback();
+    })
+
+	// 	@see #callback, above.
+	//
+	KITS.__r.push({
+		src			: src,
+		kitName	    : kitName,
+		snode		: script,
+		cont		: cont || $.noop,
+		origArgs	: args || []
+	});
+};
 
 //	##ITERATOR
 //
@@ -248,9 +242,13 @@ var	ITERATOR	= function(fn, targ, acc) {
 //								value to the node at the end of path.
 //
 var ACCESS	= function(ob, path, val) {
+
+	if(typeof path !== "string") {
+		return null;
+	}
+
 	var props 	= path ? path.split('.') : [];
 	var	pL		= props.length;
-	var orig	= ob;
 	var	i 		= 0;
 	var	p;
 
@@ -275,14 +273,15 @@ var ACCESS	= function(ob, path, val) {
 
 		ob[props[i]] = val;
 
-		return orig;
+		return val;
 
 	// Get
 	//
 	} else {
 		while(((ob = ob[props[i]]) !== void 0) && ++i < pL) {}
-		return ob;
 	}
+
+	return ob || null;
 };
 
 var FIND 	= function(attr, val, path, t, acc, currAttr) {
@@ -358,6 +357,10 @@ var	Terrace = function() {
 			}
 		}
 
+		if(path === "..") {
+		    path = "../";
+		}
+
 		//	If we didn't find the Terrace, work off a relative path for modules, and assume
 		//	that Terrace was introduced by some other means.
 		//
@@ -369,7 +372,7 @@ var	Terrace = function() {
 	//	Each Object has a namespace, which is used by various methods. You should not directly
 	//	write to this space. You should use the accessor methods, #get and #set.
 	//
-	this.ns = {
+	this.$n = {
 
 		id			: '',
 		path		: path,
@@ -380,7 +383,7 @@ var	Terrace = function() {
 		//	@see	#advise
 		//
 		advice		: [],
-		
+
 		//  @see    #ACCESS
 		//
 		store       : {},
@@ -439,9 +442,14 @@ Terrace.prototype = new function() {
 	this.arrayMethod = function(meth, fn, targ, arg2) {
 		targ 		= targ || this.$;
 		var scope	= arg2 || this;
-		var nat 	= $.options("useNativeArrayMethods");
+
+		//	Note that the #useNativeArrayMethods flag is ignored where it is not applicable.
+		//
+		var nat		= $.options("useNativeArrayMethods") && targ[meth];
+
 		switch(meth) {
 			case "each":
+			case "forEach":
 				return 	nat ? targ.forEach(fn, scope)
 						: ITERATOR.call(this, function(elem, idx, targ) {
 							fn.call(scope, elem, idx, targ);
@@ -478,6 +486,14 @@ Terrace.prototype = new function() {
 							fn.call(scope, elem, idx, targ) && acc.push(1);
 							return acc;
 						}, targ, []).length > 0;
+			break;
+
+			case "indexOf":
+				return 1
+			break;
+
+			case "lastIndexOf":
+				return 1;
 			break;
 
 			//	Note how the #reduce methods change the argument order passed to the
@@ -628,43 +644,46 @@ Terrace.prototype = new function() {
 
 	// 	##copy
 	//
-	//	Returns a copy of the sent object.  The copy may be deep or shallow.  Note that we
-	//	don't copy instances of Terrace Object, or dom Elements (or non-objects or non-arrays, as
-	//	those are not passed by refrerence, making additional copying unnecessary).
+	//	Returns a copy of the sent object.  Note that we don't copy instances of Terrace
+	//  Object, or dom Elements (or non-objects or non-arrays, as those are not passed by
+	//  refrerence, making additional copying unnecessary).
 	//
-	// 	@param		{Object}		[obj]		The object to copy.
-	//	@param		{Boolean}		[sha]		Whether to do shallow(flat) copy.
-	//	@type		{Object}
+	// 	@param		{Object}		[o]		The object to copy.
+	//	@param		{String}		[sha]	Whether do do a shallow copy.
+	//										Default is not shallow.
 	//
-	this.copy 	= function(obj, sha) {
+    this.copy = function(o, sha) {
+        var cp = function(ob) {
+            var fin;
+            var p;
 
-        var p,
-        	c;
+            if(typeof ob !== "object" || ob === null || ob.$n) {
+                return ob;
+            }
 
-        //	Don't copy non-objects (object or array), or (Terrace)Object
-        //	instances (checking for ns property).
-        //
-        if(!$.is(Object, obj) || obj.ns) {
-            return obj;
+			if($.is(Array, ob) && sha) {
+				return ob.slice(0);
+			}
+
+            try {
+                fin = new ob.constructor;
+            } catch(e) {
+                return ob;
+            }
+
+            for(p in ob) {
+                fin[p] = sha ? ob[p] : cp(ob[p]);
+            }
+
+            return fin;
         }
 
-        //	If we are unable to get a constructor on an object, then we assume it is a
-        //	some special native (dom element, css rule, etc)... just return the obj.
-        //
-        try {
-        	c = new obj.constructor;
-        } catch(e) {
-        	return obj;
-        }
-
-        for(p in obj) {
-            c[p] = sha ? obj[p] : $.copy(obj[p], sha);
-        }
-
-        return c;
+        return cp(o);
     };
 
 	//	##nextId
+	//
+	//  Simply a counter. You're safe until about +/- 9007199254740992
 	//
 	this.nextId = function() {
 		return ++ID_COUNTER;
@@ -680,22 +699,19 @@ Terrace.prototype = new function() {
 	//	difference being that this Object namespace is not replicated,
 	//	allowing new instance to maintain its own information.
 	//
-	//	@param		{Mixed}		[sub]		Object Subject. Defaults to parent Subject.
+	//	@param		{Mixed}		[init]	Initialization object. If has property #sub then
+	//									#sub becomes Subject. All other members are
+	//									run through #set(prop, value);
 	//
-	this.spawn 	= function(sub) {
+	this.spawn 	= function(init) {
 
 		var n	= new Terrace;
 
 		//	Need to beget all the extensions to this Object.
 		//
-		var	x 	= this.ns.extensions;
+		var	x 	= this.$n.extensions;
+		var sub	= this.$;
 		var	e;
-
-		//	Set Object Subject. If one is not sent, use Object.$.
-		//	Note that we ask for a copy, so that the two objects don't
-		//	conflate their Subjects.
-		//
-		n.sub(sub || this.$, true);
 
 		//	Extend the copy with Object extensions.
 		//
@@ -707,12 +723,23 @@ Terrace.prototype = new function() {
 
 		//	Add any parent/child info.  Note that each Object gets a unique id.
 		//
-		n.ns.id 	= $.nextId();
-		n.ns.parent	= this;
+		n.$n.id 	= $.nextId();
+		n.$n.parent	= this;
 
 		//	Give the parent references to its children.
 		//
-		this.ns.children && this.ns.children.push(n);
+		this.$n.children && this.$n.children.push(n);
+
+		if($.is(Object, init)) {
+			sub = init.sub || sub;
+			delete init.sub;
+
+			for(e in init) {
+				n.set(e, init[e]);
+			}
+		}
+
+		n.sub(sub);
 
 		return n;
 	};
@@ -727,7 +754,7 @@ Terrace.prototype = new function() {
 	//
 	this.advise = function(f) {
 		var x;
-		var ad 	= $.ns.advice;
+		var ad 	= $.$n.advice;
 		for(x=0; x < ad.length; x++) {
 			if(ad[x] === f) {
 				return this;
@@ -747,7 +774,7 @@ Terrace.prototype = new function() {
 	//	@param	{Function}		f		The advice method originally sent.
 	//
 	this.unadvise = function(f) {
-		var ad 	= $.ns.advice;
+		var ad 	= $.$n.advice;
 		var i	= ad.length;
 		while(i--) {
 			if(ad[i] === f) {
@@ -772,6 +799,7 @@ Terrace.prototype = new function() {
 		var returnAsValue = false;
 
 		var x;
+		var mx;
 
 		opts = opts || {};
 
@@ -779,15 +807,20 @@ Terrace.prototype = new function() {
 		//
 		if($.is(Object, methodName)) {
 			for(x in methodName) {
-				this.extend(x, methodName[x][0], methodName[x][1]);
+				mx = methodName[x];
+				if($.is(Function, mx)) {
+					this.extend(x, mx);
+				} else {
+					this.extend(x, mx[0], mx[1]);
+				}
 			}
 			return this;
 		}
 
 		//	Cannot use `$` at first character of method name.
 		//
-		if(methodName.charAt(0) === "$") {
-			return this;
+		if(methodName.charAt(0) === "$" || methodName.length < 2) {
+			throw $.error("Method names cannot begin with `$`, and must be at least 2 characters long");
 		}
 
 		//	Note how in the following two operations any existing extensions
@@ -804,7 +837,7 @@ Terrace.prototype = new function() {
             //	requests, until we have all requirements.  We also need to not
             //	queue `require` itself, and of course, `queue`...
             //
-            if(REQUIRED.length && (methodName !== 'require' && methodName !== 'queue')) {
+            if(KITS.__r.length && (methodName !== 'require' && methodName !== 'queue')) {
 
             	//	#queue allows flexible arguments length, since we expect to
             	//	be receiving method arguments.
@@ -814,7 +847,7 @@ Terrace.prototype = new function() {
             }
 
 			var methodId		= $.nextId();
-			var ns				= this.ns;
+			var ns				= this.$n;
 			var advice			= ns.advice;
 
 			ns.lastMethodName 	= methodName;
@@ -850,6 +883,9 @@ Terrace.prototype = new function() {
 				return this;
 			}
 
+            //  Generally, a method prefixed by `$` was called.
+            //  See below.
+            //
 			if(returnAsValue) {
 				return result;
 			}
@@ -866,23 +902,21 @@ Terrace.prototype = new function() {
 		//	Register the extensions for this Object. This registry is relevant when
 		//	we want to #spawn.
 		//
-        if(this.ns) {
-        	this.ns.extensions[methodName] = [fn, opts];
+        if(this.$n) {
+        	this.$n.extensions[methodName] = [fn, opts];
         }
 
         this[methodName]  			= wrappedF;
+        this[methodName].toString 	= function() {
+		    return fn.toString();
+		};
 
         this["$" + methodName] 		= function() {
         	returnAsValue = true;
         	var r = wrappedF.apply(this, $.argsToArray(arguments));
         	returnAsValue = false;
-
         	return r;
         };
-
-        this[methodName].toString 	= function() {
-		    return fn.toString();
-		};
 
         return this;
 	};
@@ -916,7 +950,9 @@ Terrace.prototype = new function() {
 $ = new Terrace();
 
 /*******************************************************************************************
- *	API methods for Object.
+ *	Data accessor methods
+ *  @see #ACCESS
+ *  @see #FIND
  *******************************************************************************************/
 
 //	##set
@@ -929,19 +965,36 @@ $.hoist("set", function(path, v, ob) {
         v = this.$;
     }
 
-    ACCESS(ob || this.ns.store, path, v);
+    return ACCESS(ob || this.$n.store, path, v);
 });
 
-//	##get
+//  ##setIfNone
 //
-//	Fetches an object from #ns#store, or from sent object.
+//	Set #v object at #path location if #path does not already exist. 
+//  Returns false if #path exists.
 //
-$.hoist("get", function(path, ob) {
-    return ACCESS(ob || this.ns.store, path);
-});
+//  @param  {String}    path    Path to the value object.
+//  @param  {Mixed}     [v]     The value to set. If none sent, defaults to Subject.
+//  @param  {Object}    [ob]    The object to access. If none set, defaults to $n.store.
+//
+$.hoist("setIfNone", function(path, v, ob) {
 
-$.hoist("find", function(attr, val, path, t) {
-    return FIND(attr, val, path, t || this.ns.store);
+    ob = ob || this.$n.store;
+    var a = ACCESS(ob, path);
+    
+    //  Exists. 
+    //
+    if(a) {
+        return false;
+    }
+
+    if(arguments.length === 1) {
+        v = this.$;
+    }
+
+    ACCESS(ob, path, v);
+    
+    return true;
 });
 
 //	##unset
@@ -953,7 +1006,7 @@ $.hoist("find", function(attr, val, path, t) {
 //	against, using second argument as path.
 //
 $.hoist("unset", function(path, obj) {
-    var ob		= obj || this.ns.store;
+    var ob		= obj || this.$n.store;
     var props 	= path.split(".");
     var pL 		= props.length;
     var i;
@@ -966,6 +1019,61 @@ $.hoist("unset", function(path, obj) {
 
     delete ob[props[pL-1]];
 });
+
+//	##get
+//
+//	Fetches an object from #ns#store, or from sent object.
+//
+$.hoist("get", function(path, ob) {
+    return ACCESS(ob || this.$n.store, path);
+});
+
+//  ##find
+//
+//  Returns a string representation of the path to a value
+//
+$.hoist("find", function(attr, val, path, t) {
+    return FIND(attr, val, path, t || this.$n.store);
+});
+
+/*******************************************************************************************
+ *	Notifications
+ *******************************************************************************************/
+
+//	##notify
+//
+//	Expects either message {String}, or object:
+//
+//	@param	{String}	[title]	An optional title. This event is published, and may be
+//								caught by humanized messaging bits, which may use it.
+//	@param	{Number}	[delay]	Milliseconds to hold message for.
+//
+$.hoist("notify", function(msg, type, ob) {
+	ob = ob || {};
+	ob = {
+		msg		: msg || "??",
+		type	: type,
+		title	: ob.title	|| "",
+		delay	: ob.delay
+	}
+
+	$.publish(".notification", ob);
+});
+
+//	##error
+//
+//	Essentially an alias for #notify, where the type of "error" is automatically added.
+//
+//	@param	{String}	[msg]	The error message.
+//	@param	{String}	[tit]	The error title.
+//
+$.hoist("error", function(msg, tit) {
+    $.notify(msg, "error", {title: tit || "Error"});
+});
+
+/*******************************************************************************************
+ *	Asynchronous list methods
+ *******************************************************************************************/
 
 //	##asyncEach
 //
@@ -1063,6 +1171,49 @@ $.hoist("asyncParEach", function(fn, finalCb, targ) {
 	}
 });
 
+/*******************************************************************************************
+ *	Type manipulation
+ *******************************************************************************************/
+
+//	##arrayToObject
+//
+//	Converts an array	: ["a", "b", "c"]
+//	To					: {"a": 0, "b": 1, "c", 2}
+//
+//	@param	{Array}		a	An array
+//
+$.hoist("arrayToObject", function(a) {
+	var len = a.length;
+	var ob 	= {};
+
+	while(len--) {
+		ob[a[len]] = len;
+	}
+
+	return ob;
+});
+
+//	##objectToArray
+//
+//	@param	{Object}	o		An object.
+//	@param	{Boolean}	[vals]	Normally the returned array is formed by pushing each object
+//								property. If #vals is set, the array index === o[prop].
+//
+$.hoist("objectToArray", function(o, vals) {
+	var p;
+	var r = [];
+
+	for(p in o) {
+		if(vals) {
+			r[o[p]] = p;
+		} else {
+			r.push(p);
+		}
+	}
+
+	return r;
+});
+
 //	##wait
 //
 //	Extended timeout. At simplest, will fire callback after given amount of time.
@@ -1132,6 +1283,44 @@ $.hoist("sub", function(v, safe) {
     return safe ? $.copy(v) : v;
 });
 
+//	##restore
+//
+//	Whenever the Subject changes the previous Subject is stored
+//	in Object.$$.  Here we simply restore that value.  Note that
+// 	the current Subject will now be stored in Object.$$, allowing
+//	some useful toggling.
+//
+//	@see		#sub
+//	@see		#extend
+//
+$.hoist('restore', function() {
+	return this.$$;
+});
+
+//  ##addScriptFile
+//
+//  Adds any number of scripts to the HEAD of the document.
+//
+//  @param  {Mixed}     src     May send a single src path, or an array of them.
+//  @param  {Function}  cb      Called on load.
+//  @param  {Object}    [doc]   A DOM document. Default is #DOCUMENT
+//
+//  @see    #ADD_SCRIPT_FILE
+//
+$.hoist("addScriptFile", function(src, cb, doc) {
+    src = $.is(Array, src) ? src : src;
+    var cnt = src.length;
+
+    $.each(function(s) {
+        ADD_SCRIPT_FILE(s, function() {
+            --cnt;
+            if(cnt === 0) {
+                cb();
+            }
+        }, doc);
+    }, src);
+});
+
 //	##require
 //
 //	Will accept any number of dependency requests, dependencies can be passed arguments and
@@ -1173,7 +1362,7 @@ $.hoist("require", function() {
 	var a;
 	var b;
 
-	//	Running from tail, accumulating and triggering on String (ie. module name).
+	//	Running from tail, accumulating and triggering on String (ie. kit name).
 	//
 	while(w--) {
 		a = args[w];
@@ -1187,17 +1376,17 @@ $.hoist("require", function() {
 		}
 	};
 
-    //  Dependencies are added FILO internally, while requested in order. To preserve a
-    //  requested order [a,b,c], we must unshift c, then b, then a.
-    //  
-    if(asDep) {
-        list.reverse();
-    }
+ 	//	Because dependencies are added LIFO (vs FIFO for non-deps) we need to reverse
+ 	//	the load order.
+ 	//
+	if(asDep) {
+		list = list.reverse();
+	}
 
 	for(w=0; w < list.length; w++) {
 		b = list[w]
 		if(!DOCUMENT) {
-			require(__dirname + "/modules/" + b[0]).call($this, b[1]);
+			require(__dirname + "/kits/" + b[0]).call($this, b[1]);
 			b[2] && b[2].call($this);
 		} else {
 			DOMREQUIRE(b[0], b[2], b[1], $this, asDep);
@@ -1264,7 +1453,7 @@ $.hoist("addKit", function(nm, funcs) {
 	//	error if was sent a general object.
 	//
 	if($.is(Object, nm)) {
-		ex 	= nm.ns.extensions;
+		ex 	= nm.$n.extensions;
 
 		for(x in ex) {
 			this.extend(x, ex[x][0], ex[x][1]);
@@ -1288,12 +1477,12 @@ $.hoist("addKit", function(nm, funcs) {
 		//
 		f.prototype	= this;
 		pro[nm]		= new f;
-		pro[nm].ns 	= {
+		pro[nm].$n 	= {
 			extensions: [],
 			id					: $.nextId(),
 			isKit				: nm,
-			advice				: $.ns.advice,
-			store               : $.ns.store,
+			advice				: $.$n.advice,
+			store               : {},
 			currTransaction		: false,
 			serialTransaction	: false,
 			lastMethodId		: null,
@@ -1353,7 +1542,7 @@ $.hoist('queue', function(qn, n) {
     //	Again, note how we are collecting the tail of the arguments object.
     //
    	var args	= $.argsToArray(arguments, 2);
-    var ns		= this.ns.Q;
+    var ns		= this.$n.Q;
     //	Automatically creates a new queue if none exists, preserving existing.
     //
    	ns[qn] = ns[qn] || [];
@@ -1379,7 +1568,7 @@ $.hoist('queue', function(qn, n) {
 //
 $.hoist('dequeue', function(qn, fn) {
 
-    var ns	= this.ns.Q;
+    var ns	= this.$n.Q;
    	var q	= ns[qn] || [];
    	var	n	= q.length;
 
@@ -1420,7 +1609,7 @@ $.hoist('dequeue', function(qn, fn) {
 //
 $.hoist('runQueue', function(qn, keep) {
 
-    var	ns	= this.ns.Q;
+    var	ns	= this.$n.Q;
    	var rq	= ns[qn] = ns[qn] || [];
 	var	c;
 	var ff;
@@ -1514,20 +1703,6 @@ $.hoist('root', function() {
 	return $;
 });
 
-//	##restore
-//
-//	Whenever the Subject changes the previous Subject is stored
-//	in Object.$$.  Here we simply restore that value.  Note that
-// 	the current Subject will now be stored in Object.$$, allowing
-//	some useful toggling.
-//
-//	@see		#sub
-//	@see		#extend
-//
-$.hoist('restore', function() {
-	return this.$$;
-});
-
 //	##memoize
 //
 //	@param		{Function}		f		The function to memoize.
@@ -1554,15 +1729,11 @@ $.hoist('merge', function() {
 
 	var res = {};
 	var a	= $.argsToArray(arguments);
-	var len	= a.length;
-	var	ob;
-	var i;
-	var k;
 
 	//	If only one argument, we are merging the sent object with Subject.
 	//	NOTE that we copy Subject.
 	//
-	if(len === 1) {
+	if(a.length === 1) {
 		a.unshift($.copy(this.$));
 	}
 
@@ -1610,17 +1781,28 @@ $.hoist('trim',	function(s) {
 
 //	##subscribe
 //
-//	Watch for the firing of a named event.
+//	Watch for the publishing of a named event.
 //
-//	@param		{String}		nm		The name of event to listen for.
-//	@param		{Function}		fn		Called when event is fired.
-//	@param		{Object}		[op]	Options:
-//											#scope 	: 	Scope to fire in;
-//											#greedy	: 	Default true. Whether to fire immediately
-//														if event has already fired.
-//											#once	: 	Whether to die once fired.
+//	@param		{Mixed}		nm		The name of event to listen for. You may send multiple
+//									event names in a space-separated string, eg. "load onEnd".
+//	@param		{Function}	fn		Called when event is fired.
+//	@param		{Object}	[op]	Options:
+//										#scope 	: 	Scope to fire in;
+//										#greedy	: 	Default true. Whether to fire immediately
+//													if event has already fired.
+//										#once	: 	Whether to die once fired.
 //
 $.hoist('subscribe', function(nm, fn, op) {
+
+	nm = nm.split(" ");
+	if(nm.length > 1) {
+		$.each(function(n) {
+			$.subscribe(n, fn, op)
+		}, nm);
+		return;
+	} else {
+		nm = nm[0];
+	}
 
 	op	= op || {};
 
@@ -1665,6 +1847,8 @@ $.hoist('subscribe', function(nm, fn, op) {
 	if(grd && EVENTS[nm].published) {
 		PUB(fn, scp, EVENTS[nm].published, dt);
 	}
+
+	$.publish(".subscribed", $.argsToArray(arguments));
 });
 
 //	#subscribeOnce
@@ -1673,6 +1857,42 @@ $.hoist('subscribe', function(nm, fn, op) {
 //
 $.hoist("subscribeOnce", function(nm, fn) {
 	this.subscribe(nm, fn, {once: true});
+});
+
+//	##adoptSubscribers
+//
+//	Returns all subscribers for an event as an array. Each item is an object:
+//	{ 	ob		:   The subscriber object.
+//		fired	:   Whether the event has already fired.
+//		publish	:   Alias to #PUB, which is called to eventually fire subscribers.
+//                  #publish([data]) to pass data to subscribers.
+//	}
+//
+//	NOTE: This is a very invasive method, and should be used with extreme
+//	caution, ideally only with subscribers that you have created, control and
+//	fully understand. You are taking responsibility, ultimately, to publish to
+//	adopted subscribers. If there is no perceived need for publishing after adoption,
+//	you are likely using this incorrectly.
+//
+//	@param	{String}	name	The name of the event subscribed to.
+//
+$.hoist("adoptSubscribers", function(name) {
+	var e = EVENTS[name] || [];
+	var r = [];
+
+	$.each(function(s) {
+        r.push({
+            ob		: s,
+            fired	: e.fired,
+            publish	: function(data) {
+                PUB(s.fn, s.scope, data, s);
+            }
+        });
+	}, e.subscribers || []);
+
+	delete EVENTS[name];
+
+	return r;
 });
 
 //	##unsubscribe
@@ -1684,7 +1904,8 @@ $.hoist("subscribeOnce", function(nm, fn) {
 //									*all* subscribed events.
 //
 //	@param		{Function}	[fn]	If this is undefined, all subscribers for this event
-//									are removed. Otherwise, the call data for each
+//									are removed. If subscriber function === fn, the subscriber
+//									is removed. Otherwise, the call data for each
 //									subscriber is passed to this filter, being removed if
 //									filter returns true.  Note that the filter function (the
 //									method you have passed as `fn`) will execute in the scope
@@ -1705,10 +1926,7 @@ $.hoist('unsubscribe', function(nm, fn) {
 		ob 	= EVENTS[nm].subscribers;
 		i	= ob.length;
 		while(i--) {
-			//	Note that we execute any Function in the scope of the event object, such that
-			//	the Function should be checking against #this.
-			//
-			if(fn === undefined || fn.call(ob[i]) === true) {
+			if(fn === void 0 || fn === ob[i].fn || fn.call(ob[i]) === true) {
 				ob.splice(i,1);
 			}
 		}
@@ -1778,7 +1996,7 @@ $.hoist('publish', function(nm, data, after) {
 //
 //	@param		{String}		nm		The name of the event.
 //	@param		{Mixed}			[data]	You may pass event data of any type using this parameter.
-//										This data will be passed to all subscribers as the 
+//										This data will be passed to all subscribers as the
 //										second argument to their callbacks.
 //	@param		{Function}		[after]	You may pass a method to fire after all subscribers
 //                                      have fired.
@@ -1953,4 +2171,5 @@ if($.document()) {(function() {
 return $;
 
 })(); // end exports
+
 
