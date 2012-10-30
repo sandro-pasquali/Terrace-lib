@@ -1,7 +1,6 @@
 {
     "name": "terrace-lib",
     "version": "0.1.1",
-    "url": "http://www.unifiedapplications.com/github/Terrace-lib",
     "description": "An extensible javascript libary for Node and the Client.",
     "keywords": ["javascript","library","framework","functional"],
     "author": "Sandro Pasquali <spasquali@gmail.com>",
